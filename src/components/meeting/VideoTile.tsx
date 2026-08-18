@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useRef, useEffect } from 'react';
-import { MicOff, Pin, PinOff, Hand, MonitorUp } from 'lucide-react';
+import { MicOff, Pin, PinOff, Hand, MonitorUp, Volume2 } from 'lucide-react';
 import { Participant } from '../../types/meeting';
 import { Avatar } from '../common/Avatar';
 import { AudioVisualizer } from '../common/AudioVisualizer';
@@ -32,13 +32,23 @@ export function VideoTile({
       if (video.srcObject !== participant.stream) {
         video.srcObject = participant.stream;
       }
-      video.play().catch(() => {
-        // Autoplay policy fallback
-      });
+      
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {
+          // Autoplay policy bypass: if blocked, try muted first then unmute
+          if (!participant.isLocal) {
+            video.muted = true;
+            video.play().then(() => {
+              video.muted = false;
+            }).catch(console.warn);
+          }
+        });
+      }
     } else {
       video.srcObject = null;
     }
-  }, [participant.stream]);
+  }, [participant.stream, participant.isLocal]);
 
   useEffect(() => {
     const screen = screenRef.current;
@@ -86,7 +96,7 @@ export function VideoTile({
             ref={videoRef}
             autoPlay
             playsInline
-            muted={participant.isLocal} // O'z ovozimiz aks-sado bermasligi uchun lokal muted, remote esa eshitiladi
+            muted={participant.isLocal} // Lokal ovoz takrorlanmasligi uchun
             className={`w-full h-full object-cover transition-all duration-300 ${
               participant.isLocal && participant.isMirrored !== false
                 ? 'transform -scale-x-100'
@@ -148,11 +158,16 @@ export function VideoTile({
               <MicOff className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
             </div>
           ) : (
-            <AudioVisualizer
-              level={participant.audioLevel}
-              isMuted={participant.isAudioMuted}
-              barCount={3}
-            />
+            <div className="flex items-center gap-1">
+              <AudioVisualizer
+                level={participant.audioLevel}
+                isMuted={participant.isAudioMuted}
+                barCount={3}
+              />
+              {!participant.isLocal && (
+                <Volume2 className="w-3 h-3 text-emerald-400" />
+              )}
+            </div>
           )}
           <span className="text-[11px] sm:text-xs font-semibold text-white truncate">
             {participant.name} {participant.isLocal && '(Siz)'}

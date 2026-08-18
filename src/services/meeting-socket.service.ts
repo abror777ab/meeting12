@@ -9,6 +9,7 @@ export type SocketEvent =
   | { type: 'USER_STATE_CHANGED'; payload: Partial<Participant> & { id: string } }
   | { type: 'CHAT_MESSAGE'; payload: ChatMessage }
   | { type: 'REACTION'; payload: FloatingReaction }
+  | { type: 'SIGNAL'; payload: { senderId: string; targetUserId: string; data: unknown } }
   | { type: 'PONG'; payload: { fromUser: Participant; allParticipants?: Participant[] } };
 
 export class MeetingSocketService {
@@ -34,7 +35,6 @@ export class MeetingSocketService {
       try {
         this.broadcastChannel = new BroadcastChannel(`meeting_room_${this.roomId}`);
         this.broadcastChannel.onmessage = (event) => {
-          // Faqat STOMP ulanmagan bo'lsa yoki mesh orqali kelsa qabul qilamiz
           if (!this.isConnected && this.onEventCallback) {
             this.onEventCallback(event.data);
           }
@@ -53,29 +53,31 @@ export class MeetingSocketService {
 
       this.client = new Client({
         webSocketFactory: () => new SockJS(socketUrl),
-        reconnectDelay: 4000,
+        reconnectDelay: 3000,
         heartbeatIncoming: 10000,
         heartbeatOutgoing: 10000,
         onConnect: () => {
           this.isConnected = true;
 
-          // 1. Xonadagi barcha voqealarga obuna bo'lish
-          this.roomSubscription = this.client?.subscribe(
-            `/topic/room/${this.roomId}`,
-            (message: IMessage) => {
-              this.handleIncomingStompMessage(message);
-            }
-          ) || null;
+          // 1. Xonadagi barcha umumiy voqealarga obuna bo'lish
+          this.roomSubscription =
+            this.client?.subscribe(
+              `/topic/room/${this.roomId}`,
+              (message: IMessage) => {
+                this.handleIncomingStompMessage(message);
+              }
+            ) || null;
 
-          // 2. Shaxsiy xabarlarga obuna bo'lish (Target user messages)
-          this.userSubscription = this.client?.subscribe(
-            `/topic/room/${this.roomId}/user/${this.user.id}`,
-            (message: IMessage) => {
-              this.handleIncomingStompMessage(message);
-            }
-          ) || null;
+          // 2. Menga kelgan shaxsiy WebRTC signallarga obuna bo'lish
+          this.userSubscription =
+            this.client?.subscribe(
+              `/topic/room/${this.roomId}/user/${this.user.id}`,
+              (message: IMessage) => {
+                this.handleIncomingStompMessage(message);
+              }
+            ) || null;
 
-          // 3. Serverga xonaga kirganimizni bildirish
+          // 3. Serverga kirganimizni bildirish
           this.sendJoin(this.user);
         },
         onStompError: (frame) => {
@@ -120,6 +122,20 @@ export class MeetingSocketService {
           });
           break;
 
+        case 'SIGNAL':
+        case 'OFFER':
+        case 'ANSWER':
+        case 'ICE_CANDIDATE':
+          this.onEventCallback({
+            type: 'SIGNAL',
+            payload: {
+              senderId: data.senderId,
+              targetUserId: data.targetUserId,
+              data: data.payload,
+            },
+          });
+          break;
+
         case 'CHAT_MESSAGE':
           this.onEventCallback({
             type: 'CHAT_MESSAGE',
@@ -136,7 +152,6 @@ export class MeetingSocketService {
 
         case 'PONG':
           if (Array.isArray(data.payload)) {
-            // Mavjud ishtirokchilar ro'yxati
             data.payload.forEach((p: Participant) => {
               if (p.id !== this.user.id && this.onEventCallback) {
                 this.onEventCallback({
@@ -171,10 +186,38 @@ export class MeetingSocketService {
       });
     }
 
-    // Local mesh fallback broadcast
     if (this.broadcastChannel) {
       try {
         this.broadcastChannel.postMessage({ type: 'USER_JOINED', payload: user });
+      } catch {}
+    }
+  }
+
+  public sendSignal(targetUserId: string, signalData: Record<string, unknown>): void {
+    if (this.isConnected && this.client?.connected) {
+      this.client.publish({
+        destination: '/app/meeting.signal',
+        body: JSON.stringify({
+          type: signalData.type || 'SIGNAL',
+          roomId: this.roomId,
+          senderId: this.user.id,
+          targetUserId: targetUserId,
+          payload: signalData,
+          timestamp: Date.now(),
+        }),
+      });
+    }
+
+    if (this.broadcastChannel) {
+      try {
+        this.broadcastChannel.postMessage({
+          type: 'SIGNAL',
+          payload: {
+            senderId: this.user.id,
+            targetUserId: targetUserId,
+            data: signalData,
+          },
+        });
       } catch {}
     }
   }

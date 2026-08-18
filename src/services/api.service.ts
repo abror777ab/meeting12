@@ -1,5 +1,5 @@
 export const BACKEND_BASE_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8080';
+  process.env.NEXT_PUBLIC_BACKEND_URL || 'https://213.199.51.43.sslip.io';
 
 export interface ApiResponse<T> {
   success: boolean;

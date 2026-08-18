@@ -26,25 +26,31 @@ export function VideoTile({
 
   useEffect(() => {
     const video = videoRef.current;
-    if (video) {
-      if (participant.stream && !participant.isVideoMuted) {
+    if (!video) return;
+
+    if (participant.stream) {
+      if (video.srcObject !== participant.stream) {
         video.srcObject = participant.stream;
-        video.play().catch(() => {});
-      } else {
-        video.srcObject = null;
       }
+      video.play().catch(() => {
+        // Autoplay policy fallback
+      });
+    } else {
+      video.srcObject = null;
     }
-  }, [participant.stream, participant.isVideoMuted]);
+  }, [participant.stream]);
 
   useEffect(() => {
     const screen = screenRef.current;
-    if (screen) {
-      if (participant.screenStream && participant.isScreenSharing) {
+    if (!screen) return;
+
+    if (participant.screenStream && participant.isScreenSharing) {
+      if (screen.srcObject !== participant.screenStream) {
         screen.srcObject = participant.screenStream;
-        screen.play().catch(() => {});
-      } else {
-        screen.srcObject = null;
       }
+      screen.play().catch(() => {});
+    } else {
+      screen.srcObject = null;
     }
   }, [participant.screenStream, participant.isScreenSharing]);
 
@@ -58,7 +64,7 @@ export function VideoTile({
           : 'border-white/10 hover:border-white/20'
       }`}
     >
-      {/* Screen Share Layer (if active) */}
+      {/* Screen Share Layer */}
       {participant.isScreenSharing && participant.screenStream ? (
         <div className="relative w-full h-full bg-black flex items-center justify-center">
           <video
@@ -80,7 +86,7 @@ export function VideoTile({
             ref={videoRef}
             autoPlay
             playsInline
-            muted={participant.isLocal} // Mute local to avoid self-echo
+            muted={participant.isLocal} // O'z ovozimiz aks-sado bermasligi uchun lokal muted, remote esa eshitiladi
             className={`w-full h-full object-cover transition-all duration-300 ${
               participant.isLocal && participant.isMirrored !== false
                 ? 'transform -scale-x-100'
@@ -92,7 +98,7 @@ export function VideoTile({
             }`}
           />
 
-          {/* Fallback Avatar */}
+          {/* Fallback Avatar when camera is off */}
           {(participant.isVideoMuted || !participant.stream) && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-[#0e121d] via-[#080a11] to-[#040508] p-4">
               <Avatar
@@ -107,7 +113,6 @@ export function VideoTile({
       )}
 
       {/* Floating Indicators Overlay */}
-      {/* Top Left: Hand Raised Badge */}
       {participant.isHandRaised && (
         <div className="absolute top-2.5 left-2.5 sm:top-3 sm:left-3 px-2.5 py-1 sm:px-3 sm:py-1.5 bg-amber-500 text-black font-bold rounded-xl sm:rounded-2xl flex items-center gap-1.5 shadow-lg shadow-amber-500/30 animate-bounce z-10">
           <Hand className="w-3.5 h-3.5 fill-current" />
@@ -115,7 +120,7 @@ export function VideoTile({
         </div>
       )}
 
-      {/* Top Right: Pin Button (appears on hover or active) */}
+      {/* Pin Button */}
       {onTogglePin && (
         <button
           type="button"
@@ -135,7 +140,7 @@ export function VideoTile({
         </button>
       )}
 
-      {/* Bottom Name & Audio Indicator Bar */}
+      {/* Bottom Name & Audio Visualizer Bar */}
       <div className="absolute bottom-2.5 left-2.5 right-2.5 sm:bottom-3 sm:left-3 sm:right-3 flex items-center justify-between pointer-events-none z-10">
         <div className="flex items-center gap-1.5 sm:gap-2 px-2.5 py-1 sm:px-3 sm:py-1.5 bg-black/60 backdrop-blur-md rounded-xl border border-white/10 max-w-[90%]">
           {participant.isAudioMuted ? (

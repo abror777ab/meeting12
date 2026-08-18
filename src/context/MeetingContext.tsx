@@ -7,6 +7,7 @@ import React, {
   useCallback,
   useRef,
   useMemo,
+  useEffect,
   ReactNode,
 } from 'react';
 import {
@@ -24,12 +25,12 @@ import { useScreenShare } from '../hooks/useScreenShare';
 import { useMeetingRecorder } from '../hooks/useMeetingRecorder';
 import { useAudioVisualizer } from '../hooks/useAudioVisualizer';
 import { MeetingSocketService } from '../services/meeting-socket.service';
+import { WebRTCManager } from '../services/webrtc.service';
 import { ApiService } from '../services/api.service';
 import { generateId } from '../utils/formatters';
 import { AVATAR_COLORS } from '../utils/constants';
 
 interface MeetingContextType {
-  // Room State
   roomId: string;
   roomTitle: string;
   isJoined: boolean;
@@ -38,7 +39,6 @@ interface MeetingContextType {
   activeSpeakerId: string | null;
   unreadCount: number;
 
-  // Current User
   currentUser: Participant | null;
   localStream: MediaStream | null;
   screenStream: MediaStream | null;
@@ -52,24 +52,18 @@ interface MeetingContextType {
   audioConfig: AudioProcessingConfig;
   videoConfig: VideoProcessingConfig;
 
-  // Participants
   participants: Participant[];
-
-  // Chat & Reactions
   messages: ChatMessage[];
   reactions: FloatingReaction[];
 
-  // Panels & Modals
   isChatOpen: boolean;
   isParticipantsOpen: boolean;
   isSettingsOpen: boolean;
   isInviteOpen: boolean;
 
-  // Recording
   isRecording: boolean;
   recordingDuration: number;
 
-  // Actions
   joinRoom: (roomId: string, userName: string, avatarColor?: string) => Promise<void>;
   leaveRoom: () => void;
   toggleAudio: () => void;
@@ -109,27 +103,23 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
   const [isHandRaised, setIsHandRaised] = useState<boolean>(false);
   const [unreadCount, setUnreadCount] = useState<number>(0);
 
-  // Sidebars
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isParticipantsOpen, setIsParticipantsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isInviteOpen, setIsInviteOpen] = useState(false);
 
-  // Lists
   const [remoteParticipants, setRemoteParticipants] = useState<Participant[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [reactions, setReactions] = useState<FloatingReaction[]>([]);
 
-  // User Profile
   const [currentUserId, setCurrentUserId] = useState<string>('');
   const [userName, setUserName] = useState<string>('');
   const [userColor, setUserColor] = useState<string>(AVATAR_COLORS[0]);
   const [joinTimestamp, setJoinTimestamp] = useState<number>(0);
 
-  // STOMP WebSocket Service
   const socketServiceRef = useRef<MeetingSocketService | null>(null);
+  const webrtcManagerRef = useRef<WebRTCManager | null>(null);
 
-  // Custom Hooks
   const {
     localStream,
     isAudioMuted,
@@ -166,7 +156,13 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
 
   const localAudioLevel = useAudioVisualizer(localStream, isAudioMuted);
 
-  // Active Speaker computed directly
+  // Sync local stream with WebRTC Manager
+  useEffect(() => {
+    if (webrtcManagerRef.current) {
+      webrtcManagerRef.current.setLocalStream(localStream);
+    }
+  }, [localStream]);
+
   const activeSpeakerId = useMemo(() => {
     if (localAudioLevel > 25) {
       return currentUserId;
@@ -175,7 +171,6 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
     return loudestRemote ? loudestRemote.id : null;
   }, [localAudioLevel, currentUserId, remoteParticipants]);
 
-  // Local User Object
   const currentUser: Participant | null = useMemo(() => {
     if (!isJoined) return null;
     return {
@@ -212,13 +207,11 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
     joinTimestamp,
   ]);
 
-  // All combined participants
   const participants = useMemo(() => {
     if (!currentUser) return remoteParticipants;
     return [currentUser, ...remoteParticipants];
   }, [currentUser, remoteParticipants]);
 
-  // Initialize room with Spring Boot Backend & STOMP
   const joinRoom = useCallback(
     async (targetRoomId: string, name: string, avatarColor?: string) => {
       const uId = generateId('user');
@@ -253,14 +246,36 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
       const socket = new MeetingSocketService(targetRoomId, newLocalUser);
       socketServiceRef.current = socket;
 
+      // 2. WebRTC P2P Menejeri (Audio/Video oqimlarini to'g'ridan-to'g'ri ulash)
+      const webrtc = new WebRTCManager(
+        uId,
+        socket,
+        (remoteUserId, stream) => {
+          // Masofaviy (masalan telefondagi) foydalanuvchining video va audio oqimi kelganda
+          setRemoteParticipants((prev) =>
+            prev.map((p) => (p.id === remoteUserId ? { ...p, stream } : p))
+          );
+        },
+        (remoteUserId) => {
+          // Foydalanuvchi uzilganda
+          setRemoteParticipants((prev) => prev.filter((p) => p.id !== remoteUserId));
+        }
+      );
+      webrtcManagerRef.current = webrtc;
+      webrtc.setLocalStream(localStream);
+
       socket.onEvent((event) => {
         switch (event.type) {
           case 'USER_JOINED': {
             if (event.payload.id === uId) return;
+
             setRemoteParticipants((prev) => {
               if (prev.some((p) => p.id === event.payload.id)) return prev;
               return [...prev, { ...event.payload, isLocal: false }];
             });
+
+            // Yangi kishi qo'shilganda unga darhol WebRTC P2P Offer yuborish
+            webrtc.createPeerConnection(event.payload.id, true);
 
             setMessages((prev) => [
               ...prev,
@@ -277,7 +292,15 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
             break;
           }
 
+          case 'SIGNAL': {
+            if (event.payload.targetUserId === uId || !event.payload.targetUserId) {
+              webrtc.handleSignal(event.payload.senderId, event.payload.data);
+            }
+            break;
+          }
+
           case 'USER_LEFT': {
+            webrtc.removePeer(event.payload.userId);
             setRemoteParticipants((prev) => {
               const leavingUser = prev.find((p) => p.id === event.payload.userId);
               const displayName = leavingUser?.name || event.payload.userName || 'Foydalanuvchi';
@@ -334,13 +357,14 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
                 if (prev.some((p) => p.id === event.payload.fromUser.id)) return prev;
                 return [...prev, { ...event.payload.fromUser, isLocal: false }];
               });
+              webrtc.createPeerConnection(event.payload.fromUser.id, true);
             }
             break;
           }
         }
       });
 
-      // 2. Chat tarixini yuklash (REST API: GET /api/chat/{roomId}/messages)
+      // 3. Chat tarixini yuklash
       try {
         const history = await ApiService.getChatHistory(targetRoomId);
         if (history && history.length > 0) {
@@ -382,10 +406,14 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
         ]);
       }
     },
-    [isAudioMuted, isVideoMuted, isChatOpen]
+    [isAudioMuted, isVideoMuted, isChatOpen, localStream]
   );
 
   const leaveRoom = useCallback(() => {
+    if (webrtcManagerRef.current) {
+      webrtcManagerRef.current.destroy();
+      webrtcManagerRef.current = null;
+    }
     if (socketServiceRef.current) {
       socketServiceRef.current.destroy();
       socketServiceRef.current = null;
@@ -397,7 +425,6 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
     setReactions([]);
   }, [stopScreenShare]);
 
-  // Audio mute toggling with STOMP broadcast
   const toggleAudio = useCallback(() => {
     hookToggleAudio();
     if (socketServiceRef.current && currentUserId) {
@@ -408,7 +435,6 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
     }
   }, [hookToggleAudio, currentUserId, isAudioMuted]);
 
-  // Video mute toggling with STOMP broadcast
   const toggleVideo = useCallback(() => {
     hookToggleVideo();
     if (socketServiceRef.current && currentUserId) {
@@ -419,7 +445,6 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
     }
   }, [hookToggleVideo, currentUserId, isVideoMuted]);
 
-  // Screen sharing toggle with STOMP broadcast
   const toggleScreenShareAction = useCallback(async () => {
     const stream = await hookToggleScreenShare();
     const isNowSharing = Boolean(stream);
@@ -431,7 +456,6 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
     }
   }, [hookToggleScreenShare, currentUserId]);
 
-  // Send Floating Reaction (declared before toggleHandRaise)
   const sendReaction = useCallback(
     (emoji: string) => {
       if (!currentUserId || !userName) return;
@@ -441,7 +465,7 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
         senderName: userName,
         emoji,
         timestamp: Date.now(),
-        xPosition: Math.floor(Math.random() * 70) + 15, // 15% to 85%
+        xPosition: Math.floor(Math.random() * 70) + 15,
       };
 
       setReactions((prev) => [...prev, reaction]);
@@ -454,7 +478,6 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
     [currentUserId, userName]
   );
 
-  // Hand raise toggle
   const toggleHandRaise = useCallback(() => {
     const nextState = !isHandRaised;
     setIsHandRaised(nextState);
@@ -469,13 +492,11 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
     }
   }, [isHandRaised, currentUserId, sendReaction]);
 
-  // Recording
   const toggleRecordingAction = useCallback(() => {
     const streamToRecord = screenStream || localStream;
     hookToggleRecording(streamToRecord, roomTitle);
   }, [screenStream, localStream, hookToggleRecording, roomTitle]);
 
-  // Send Chat Message to Backend
   const sendMessage = useCallback(
     (text: string) => {
       if (!text.trim() || !currentUser) return;
@@ -495,19 +516,16 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
     [currentUser]
   );
 
-  // Kick / remove participant
   const removeParticipant = useCallback((participantId: string) => {
     setRemoteParticipants((prev) => prev.filter((p) => p.id !== participantId));
   }, []);
 
-  // Mute all participants
   const muteAllParticipants = useCallback(() => {
     setRemoteParticipants((prev) =>
       prev.map((p) => ({ ...p, isAudioMuted: true }))
     );
   }, []);
 
-  // Reset unread count when opening chat
   const handleSetIsChatOpen = useCallback((open: boolean) => {
     setIsChatOpen(open);
     if (open) {

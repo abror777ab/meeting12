@@ -272,7 +272,7 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
               return [...prev, { ...event.payload, isLocal: false }];
             });
 
-            // Yangi kishi kirganda unga darhol WebRTC Offer boshlash
+            // Biz xonada avvaldan bor bo'lganimiz uchun yangi kishiga OFFER yuboramiz
             webrtc.createPeerConnection(event.payload.id, true);
 
             setMessages((prev) => [
@@ -362,7 +362,8 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
                     if (prev.some((x) => x.id === p.id)) return prev;
                     return [...prev, { ...p, isLocal: false }];
                   });
-                  webrtc.createPeerConnection(p.id, true);
+                  // Yangi kirgan odam sifatida xonadagilardan Offer kutamiz (isInitiator = false)
+                  webrtc.createPeerConnection(p.id, false);
                 }
               });
             }
@@ -381,7 +382,7 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
                 if (prev.some((x) => x.id === p.id)) return prev;
                 return [...prev, { ...p, isLocal: false }];
               });
-              webrtc.createPeerConnection(p.id, true);
+              webrtc.createPeerConnection(p.id, false);
             }
           });
         }

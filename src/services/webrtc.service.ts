@@ -31,14 +31,20 @@ export const ICE_SERVERS: RTCConfiguration = {
 export type RemoteStreamCallback = (userId: string, stream: MediaStream) => void;
 export type RemoteStreamRemoveCallback = (userId: string) => void;
 
-export interface WebRTCSignalPayload {
-  type: 'OFFER' | 'ANSWER' | 'ICE_CANDIDATE';
+interface GenericSignalObject {
+  type?: string;
   sdp?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
+  payload?: {
+    type?: string;
+    sdp?: RTCSessionDescriptionInit;
+    candidate?: RTCIceCandidateInit;
+  };
 }
 
 export class WebRTCManager {
   private peers: Map<string, RTCPeerConnection> = new Map();
+  private remoteStreams: Map<string, MediaStream> = new Map();
   private pendingCandidates: Map<string, RTCIceCandidateInit[]> = new Map();
   private localStream: MediaStream | null = null;
   private socketService: MeetingSocketService;
@@ -89,18 +95,32 @@ export class WebRTCManager {
     this.peers.set(targetUserId, peer);
     this.pendingCandidates.set(targetUserId, []);
 
-    // Local audio va video treklarini qo'shish
+    // 1. Transceiverlarni oldindan yaratish (Kamera/mic bo'lmasa ham audio/video kanallari darhol ochiladi)
+    try {
+      peer.addTransceiver('audio', { direction: 'sendrecv' });
+      peer.addTransceiver('video', { direction: 'sendrecv' });
+    } catch (e) {
+      console.warn('Transceiver yaratishda ogohlantirish:', e);
+    }
+
+    // 2. Local stream treklarini qo'shish
     if (this.localStream) {
+      const senders = peer.getSenders();
       this.localStream.getTracks().forEach((track) => {
-        try {
-          peer.addTrack(track, this.localStream!);
-        } catch (e) {
-          console.warn('Local track qo‘shishda ogohlantirish:', e);
+        const sender = senders.find((s) => s.track?.kind === track.kind);
+        if (sender) {
+          sender.replaceTrack(track).catch(console.warn);
+        } else {
+          try {
+            peer.addTrack(track, this.localStream!);
+          } catch (e) {
+            console.warn('Local track qo‘shishda ogohlantirish:', e);
+          }
         }
       });
     }
 
-    // ICE Candidate paydo bo'lganda server orqali boshqa foydalanuvchiga yuborish
+    // 3. ICE Candidate paydo bo'lganda server orqali yuborish
     peer.onicecandidate = (event) => {
       if (event.candidate) {
         this.socketService.sendSignal(targetUserId, {
@@ -110,14 +130,27 @@ export class WebRTCManager {
       }
     };
 
-    // Masofaviy (telefon/kompyuter) audio/video trek kelganda
+    // 4. Masofaviy (remote) video/audio trek kelganda
     peer.ontrack = (event) => {
-      if (event.streams && event.streams[0]) {
-        this.onRemoteStreamAdded(targetUserId, event.streams[0]);
-      } else if (event.track) {
-        const inboundStream = new MediaStream([event.track]);
-        this.onRemoteStreamAdded(targetUserId, inboundStream);
+      let stream = this.remoteStreams.get(targetUserId);
+      if (!stream) {
+        stream = new MediaStream();
+        this.remoteStreams.set(targetUserId, stream);
       }
+
+      if (event.streams && event.streams[0]) {
+        event.streams[0].getTracks().forEach((track) => {
+          if (!stream!.getTracks().some((t) => t.id === track.id)) {
+            stream!.addTrack(track);
+          }
+        });
+      } else if (event.track) {
+        if (!stream.getTracks().some((t) => t.id === event.track.id)) {
+          stream.addTrack(event.track);
+        }
+      }
+
+      this.onRemoteStreamAdded(targetUserId, stream);
     };
 
     peer.oniceconnectionstatechange = () => {
@@ -126,7 +159,7 @@ export class WebRTCManager {
         peer.iceConnectionState === 'failed' ||
         peer.iceConnectionState === 'closed'
       ) {
-        console.warn(`Peer ${targetUserId} aloqasi uzildi:`, peer.iceConnectionState);
+        console.warn(`Peer ${targetUserId} holati:`, peer.iceConnectionState);
       }
     };
 
@@ -155,18 +188,25 @@ export class WebRTCManager {
    */
   public async handleSignal(senderId: string, rawSignalData: unknown): Promise<void> {
     if (!rawSignalData || typeof rawSignalData !== 'object') return;
-    const signalData = rawSignalData as WebRTCSignalPayload;
+    const signalData = rawSignalData as GenericSignalObject;
 
-    switch (signalData.type) {
+    const type = signalData.type || signalData.payload?.type;
+    const sdp = signalData.sdp || signalData.payload?.sdp;
+    const candidate = signalData.candidate || signalData.payload?.candidate;
+
+    switch (type) {
       case 'OFFER': {
-        if (signalData.sdp) {
+        if (sdp) {
           const peer = await this.createPeerConnection(senderId, false);
-          await peer.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
+          await peer.setRemoteDescription(new RTCSessionDescription(sdp));
 
-          // Navbatdagi ICE larni qo'shish
+          // Navbatdagi ICE nomzodlarni qo'shish
           this.flushPendingCandidates(senderId, peer);
 
-          const answer = await peer.createAnswer();
+          const answer = await peer.createAnswer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true,
+          });
           await peer.setLocalDescription(answer);
 
           this.socketService.sendSignal(senderId, {
@@ -178,10 +218,10 @@ export class WebRTCManager {
       }
 
       case 'ANSWER': {
-        if (signalData.sdp) {
+        if (sdp) {
           const peer = this.peers.get(senderId);
           if (peer && peer.signalingState !== 'stable') {
-            await peer.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
+            await peer.setRemoteDescription(new RTCSessionDescription(sdp));
             this.flushPendingCandidates(senderId, peer);
           }
         }
@@ -189,17 +229,17 @@ export class WebRTCManager {
       }
 
       case 'ICE_CANDIDATE': {
-        if (signalData.candidate) {
+        if (candidate) {
           const peer = this.peers.get(senderId);
           if (peer && peer.remoteDescription && peer.remoteDescription.type) {
             try {
-              await peer.addIceCandidate(new RTCIceCandidate(signalData.candidate));
+              await peer.addIceCandidate(new RTCIceCandidate(candidate));
             } catch (e) {
               console.warn('ICE Candidate qo‘shishda ogohlantirish:', e);
             }
           } else {
             const queue = this.pendingCandidates.get(senderId) || [];
-            queue.push(signalData.candidate);
+            queue.push(candidate);
             this.pendingCandidates.set(senderId, queue);
           }
         }
@@ -226,6 +266,7 @@ export class WebRTCManager {
       } catch {}
       this.peers.delete(userId);
       this.pendingCandidates.delete(userId);
+      this.remoteStreams.delete(userId);
       this.onRemoteStreamRemoved(userId);
     }
   }
@@ -238,5 +279,6 @@ export class WebRTCManager {
     });
     this.peers.clear();
     this.pendingCandidates.clear();
+    this.remoteStreams.clear();
   }
 }

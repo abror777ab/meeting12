@@ -7,6 +7,23 @@ export const ICE_SERVERS: RTCConfiguration = {
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:stun.relay.metered.ca:80' },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
   ],
   iceCandidatePoolSize: 10,
 };
@@ -72,7 +89,7 @@ export class WebRTCManager {
     this.peers.set(targetUserId, peer);
     this.pendingCandidates.set(targetUserId, []);
 
-    // Local stream tracklarini peer ga qo'shish
+    // Local audio va video treklarini qo'shish
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => {
         try {
@@ -83,7 +100,7 @@ export class WebRTCManager {
       });
     }
 
-    // ICE Candidate paydo bo'lganda
+    // ICE Candidate paydo bo'lganda server orqali boshqa foydalanuvchiga yuborish
     peer.onicecandidate = (event) => {
       if (event.candidate) {
         this.socketService.sendSignal(targetUserId, {
@@ -93,10 +110,13 @@ export class WebRTCManager {
       }
     };
 
-    // Remote audio/video kelganda
+    // Masofaviy (telefon/kompyuter) audio/video trek kelganda
     peer.ontrack = (event) => {
       if (event.streams && event.streams[0]) {
         this.onRemoteStreamAdded(targetUserId, event.streams[0]);
+      } else if (event.track) {
+        const inboundStream = new MediaStream([event.track]);
+        this.onRemoteStreamAdded(targetUserId, inboundStream);
       }
     };
 
@@ -106,7 +126,7 @@ export class WebRTCManager {
         peer.iceConnectionState === 'failed' ||
         peer.iceConnectionState === 'closed'
       ) {
-        this.onRemoteStreamRemoved(targetUserId);
+        console.warn(`Peer ${targetUserId} aloqasi uzildi:`, peer.iceConnectionState);
       }
     };
 
@@ -143,7 +163,7 @@ export class WebRTCManager {
           const peer = await this.createPeerConnection(senderId, false);
           await peer.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
 
-          // Navbatda turgan ICE nomzodlarni qo'shish
+          // Navbatdagi ICE larni qo'shish
           this.flushPendingCandidates(senderId, peer);
 
           const answer = await peer.createAnswer();
@@ -178,7 +198,6 @@ export class WebRTCManager {
               console.warn('ICE Candidate qo‘shishda ogohlantirish:', e);
             }
           } else {
-            // Agar remote description hali kelmagan bo'lsa navbatga qo'yish
             const queue = this.pendingCandidates.get(senderId) || [];
             queue.push(signalData.candidate);
             this.pendingCandidates.set(senderId, queue);

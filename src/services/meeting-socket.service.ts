@@ -201,6 +201,7 @@ export class MeetingSocketService {
           type: signalData.type || 'SIGNAL',
           roomId: this.roomId,
           senderId: this.user.id,
+          targetId: targetUserId,
           targetUserId: targetUserId,
           payload: signalData,
           timestamp: Date.now(),

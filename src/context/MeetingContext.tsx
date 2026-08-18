@@ -246,18 +246,16 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
       const socket = new MeetingSocketService(targetRoomId, newLocalUser);
       socketServiceRef.current = socket;
 
-      // 2. WebRTC P2P Menejeri (Audio/Video oqimlarini to'g'ridan-to'g'ri ulash)
+      // 2. WebRTC P2P Menejeri
       const webrtc = new WebRTCManager(
         uId,
         socket,
         (remoteUserId, stream) => {
-          // Masofaviy (masalan telefondagi) foydalanuvchining video va audio oqimi kelganda
           setRemoteParticipants((prev) =>
             prev.map((p) => (p.id === remoteUserId ? { ...p, stream } : p))
           );
         },
         (remoteUserId) => {
-          // Foydalanuvchi uzilganda
           setRemoteParticipants((prev) => prev.filter((p) => p.id !== remoteUserId));
         }
       );
@@ -274,7 +272,7 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
               return [...prev, { ...event.payload, isLocal: false }];
             });
 
-            // Yangi kishi qo'shilganda unga darhol WebRTC P2P Offer yuborish
+            // Yangi kishi kirganda unga darhol WebRTC Offer boshlash
             webrtc.createPeerConnection(event.payload.id, true);
 
             setMessages((prev) => [
@@ -293,7 +291,12 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
           }
 
           case 'SIGNAL': {
-            if (event.payload.targetUserId === uId || !event.payload.targetUserId) {
+            const isForMe =
+              event.payload.targetUserId === uId ||
+              !event.payload.targetUserId ||
+              event.payload.targetUserId === '';
+
+            if (isForMe && event.payload.senderId !== uId) {
               webrtc.handleSignal(event.payload.senderId, event.payload.data);
             }
             break;
@@ -352,19 +355,41 @@ export function MeetingProvider({ children }: { children: ReactNode }) {
           }
 
           case 'PONG': {
-            if (event.payload.fromUser && event.payload.fromUser.id !== uId) {
-              setRemoteParticipants((prev) => {
-                if (prev.some((p) => p.id === event.payload.fromUser.id)) return prev;
-                return [...prev, { ...event.payload.fromUser, isLocal: false }];
+            if (Array.isArray(event.payload)) {
+              event.payload.forEach((p: Participant) => {
+                if (p.id !== uId) {
+                  setRemoteParticipants((prev) => {
+                    if (prev.some((x) => x.id === p.id)) return prev;
+                    return [...prev, { ...p, isLocal: false }];
+                  });
+                  webrtc.createPeerConnection(p.id, true);
+                }
               });
-              webrtc.createPeerConnection(event.payload.fromUser.id, true);
             }
             break;
           }
         }
       });
 
-      // 3. Chat tarixini yuklash
+      // 3. Xonadagi mavjud ishtirokchilarni REST API orqali ham yuklash
+      try {
+        const roomInfo = await ApiService.getRoomStatus(targetRoomId);
+        if (roomInfo && roomInfo.participants) {
+          roomInfo.participants.forEach((p) => {
+            if (p.id !== uId) {
+              setRemoteParticipants((prev) => {
+                if (prev.some((x) => x.id === p.id)) return prev;
+                return [...prev, { ...p, isLocal: false }];
+              });
+              webrtc.createPeerConnection(p.id, true);
+            }
+          });
+        }
+      } catch (e) {
+        console.warn('Xona ma‘lumotlarini yuklashda ogohlantirish:', e);
+      }
+
+      // 4. Chat tarixini yuklash
       try {
         const history = await ApiService.getChatHistory(targetRoomId);
         if (history && history.length > 0) {
